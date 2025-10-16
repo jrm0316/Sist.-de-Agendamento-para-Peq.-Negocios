@@ -1,0 +1,5 @@
+body { font-family: Arial, sans-serif; margin:20px; }
+header { margin-bottom: 20px; }
+header nav a { margin-right: 10px; }
+table th { background:#ddd; }
+.appt { background:#cfe2ff; padding:2px 4px; margin:2px 0; display:block; border-radius:4px; }
