@@ -1,0 +1,440 @@
+from datetime import datetime, date, timedelta
+import calendar
+from flask import Flask, request, redirect, url_for, render_template_string, flash
+from flask_sqlalchemy import SQLAlchemy
+
+
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///agenda.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'dev-secret-change-me'
+
+db = SQLAlchemy(app)
+
+# Models
+class Client(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    phone = db.Column(db.String(40))
+    email = db.Column(db.String(120))
+    notes = db.Column(db.Text)
+
+appointments = db.relationship('Appointment', backref='client', cascade='all, delete-orphan')
+
+
+def __repr__(self):
+    return f"<Client {self.name}>"
+
+
+class Appointment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False)
+    starts_at = db.Column(db.DateTime, nullable=False)
+    ends_at = db.Column(db.DateTime, nullable=False)
+    description = db.Column(db.String(250))
+
+
+def __repr__(self):
+    return f"<Appointment {self.id} - {self.starts_at}>"
+
+
+# Initialize DB
+with app.app_context():
+    db.create_all()
+
+
+# Helpers for calendar
+def month_calendar(year, month):
+    """Return a list of weeks; each week is list of date objects or None"""
+    cal = calendar.Calendar()
+    month_days = cal.monthdatescalendar(year, month)
+    return month_days
+
+
+# Routes
+@app.route('/')
+def index():
+    # Exibe o calendário mensal com os agendamentos
+
+    # Obtém o ano e mês da URL (ou usa o atual)
+    try:
+        year = int(request.args.get('year', date.today().year))
+        month = int(request.args.get('month', date.today().month))
+    except ValueError:
+        year, month = date.today().year, date.today().month
+
+    # Gera a grade do calendário (semanas)
+    grid = month_calendar(year, month)
+
+    # Define intervalo do mês
+    start = datetime(year, month, 1)
+    if month == 12:
+        end = datetime(year + 1, 1, 1)
+    else:
+        end = datetime(year, month + 1, 1)
+
+    # Busca compromissos no mês
+    appts = Appointment.query.filter(
+        Appointment.starts_at >= start,
+        Appointment.starts_at < end
+    ).all()
+
+    # Organiza por dia
+    appts_by_date = {}
+    for a in appts:
+        d = a.starts_at.date()
+        appts_by_date.setdefault(d, []).append(a)
+
+    # Nome do mês
+    month_name = calendar.month_name[month]
+
+    # Substitui o bloco content pelo HTML da página
+    return render_template_string(
+        TEMPLATE_BASE.replace(
+            '{% block content %}{% endblock %}',
+            TEMPLATE_INDEX_CONTENT
+        ),
+        grid=grid,
+        year=year,
+        month=month,
+        month_name=month_name,
+        appts_by_date=appts_by_date,
+        #datetime=datetime  # importante para usar "date()" no template
+    )
+
+@app.route('/clients')
+def clients():
+    clients = Client.query.order_by(Client.name).all()
+    return render_template_string(TEMPLATE_CLIENTS, clients=clients)
+
+@app.route('/clients/new', methods=['GET', 'POST'])
+def new_client():
+    if request.method == 'POST':
+        name = request.form.get('name').strip()
+        if not name:
+            flash('Nome é obrigatório', 'danger')
+            return redirect(url_for('new_client'))
+        c = Client(name=name, phone=request.form.get('phone'), email=request.form.get('email'), notes=request.form.get('notes'))
+        db.session.add(c)
+        db.session.commit()
+        flash('Cliente criado', 'success')
+    return redirect(url_for('clients'))
+    return render_template_string(TEMPLATE_CLIENT_FORM, client=None)
+
+@app.route('/clients/<int:client_id>/edit', methods=['GET', 'POST'])
+def edit_client(client_id):
+    client = Client.query.get_or_404(client_id)
+    if request.method == 'POST':
+        name = request.form.get('name').strip()
+        if not name:
+            flash('Nome é obrigatório', 'danger')
+            return redirect(url_for('edit_client', client_id=client.id))
+        client.name = name
+        client.phone = request.form.get('phone')
+        client.email = request.form.get('email')
+        client.notes = request.form.get('notes')
+        db.session.commit()
+        flash('Cliente atualizado', 'success')
+        return redirect(url_for('clients'))
+    return render_template_string(TEMPLATE_CLIENT_FORM, client=client)
+
+@app.route('/clients/<int:client_id>/delete', methods=['POST'])
+def delete_client(client_id):
+    client = Client.query.get_or_404(client_id)
+    db.session.delete(client)
+    db.session.commit()
+    flash('Cliente deletado', 'success')
+    return redirect(url_for('clients'))
+
+
+# Appointments CRUD
+@app.route('/appointments')
+def appointments():
+    appts = Appointment.query.order_by(Appointment.starts_at).all()
+    return render_template_string(TEMPLATE_APPOINTMENTS, appts=appts)
+
+
+@app.route('/appointments/new', methods=['GET', 'POST'])
+def new_appointment():
+    clients = Client.query.order_by(Client.name).all()
+    if not clients:
+        flash('Cadastre ao menos um cliente antes de criar um agendamento.', 'danger')
+        return redirect(url_for('clients'))
+
+
+    if request.method == 'POST':
+        client_id = int(request.form.get('client_id'))
+        date_str = request.form.get('date')
+        time_str = request.form.get('time')
+        duration_min = int(request.form.get('duration', 60))
+        description = request.form.get('description')
+
+        starts_at = datetime.fromisoformat(f"{date_str}T{time_str}")
+        ends_at = starts_at + timedelta(minutes=duration_min)
+
+
+        # check overlap
+        overlapping = Appointment.query.filter(Appointment.client_id == client_id, Appointment.starts_at < ends_at, Appointment.ends_at > starts_at).first()
+        if overlapping:
+            flash('Há um agendamento em conflito para esse cliente no horário escolhido.', 'danger')
+            return redirect(url_for('new_appointment'))
+
+        a = Appointment(client_id=client_id, starts_at=starts_at, ends_at=ends_at, description=description)
+        db.session.add(a)
+        db.session.commit()
+        flash('Agendamento criado', 'success')
+        return redirect(url_for('appointments'))
+
+    return render_template_string(TEMPLATE_APPOINTMENT_FORM, clients=clients, appt=None)
+
+
+@app.route('/appointments/<int:appt_id>/edit', methods=['GET', 'POST'])
+def edit_appointment(appt_id):
+    appt = Appointment.query.get_or_404(appt_id)
+    clients = Client.query.order_by(Client.name).all()
+    if request.method == 'POST':
+        client_id = int(request.form.get('client_id'))
+        date_str = request.form.get('date')
+        time_str = request.form.get('time')
+        duration_min = int(request.form.get('duration', 60))
+        description = request.form.get('description')
+
+        starts_at = datetime.fromisoformat(f"{date_str}T{time_str}")
+        ends_at = starts_at + timedelta(minutes=duration_min)
+
+        overlapping = Appointment.query.filter(Appointment.id != appt.id, Appointment.client_id == client_id, Appointment.starts_at < ends_at, Appointment.ends_at > starts_at).first()
+        if overlapping:
+            flash('Há um agendamento em conflito para esse cliente no horário escolhido.', 'danger')
+            return redirect(url_for('edit_appointment', appt_id=appt.id))
+
+        appt.client_id = client_id
+        appt.starts_at = starts_at
+        appt.ends_at = ends_at
+        appt.description = description
+        db.session.commit()
+        flash('Agendamento atualizado', 'success')
+        return redirect(url_for('appointments'))
+
+    return render_template_string(TEMPLATE_APPOINTMENT_FORM, clients=clients, appt=appt)
+
+@app.route('/appointments/<int:appt_id>/delete', methods=['POST'])
+def delete_appointment(appt_id):
+    appt = Appointment.query.get_or_404(appt_id)
+    db.session.delete(appt)
+    db.session.commit()
+    flash('Agendamento deletado', 'success')
+    return redirect(url_for('appointments'))
+
+
+# Quick route to create sample data
+@app.route('/seed')
+def seed():
+    if Client.query.count() == 0:
+        c1 = Client(name='João Silva', phone='(11) 99999-0001', email='joao@example.com')
+        c2 = Client(name='Maria Souza', phone='(11) 99999-0002', email='maria@example.com')
+        db.session.add_all([c1, c2])
+        db.session.commit()
+        a1 = Appointment(client_id=c1.id, starts_at=datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9), ends_at=datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=10), description='Consulta inicial')
+        a2 = Appointment(client_id=c2.id, starts_at=datetime.combine(date.today()+timedelta(days=1), datetime.min.time()) + timedelta(hours=14), ends_at=datetime.combine(date.today()+timedelta(days=1), datetime.min.time()) + timedelta(hours=15), description='Acompanhamento')
+        db.session.add_all([a1, a2])
+        db.session.commit()
+        return 'Seed criado!'
+    return 'Já existe dados.'
+
+# Templates (render_template_string to keep single-file)
+TEMPLATE_BASE = '''
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agenda - CRUD</title>
+<style>
+body{font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin:0;padding:0;background:#f7f7f8}
+.container{max-width:1000px;margin:24px auto;padding:18px;background:#fff;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,.06)}
+header{display:flex;gap:12px;align-items:center}
+nav a{margin-right:12px;text-decoration:none}
+.calendar{width:100%;border-collapse:collapse}
+.calendar th, .calendar td{border:1px solid #eee;padding:8px;vertical-align:top;height:110px}
+.today{background:linear-gradient(90deg,#e6fffa,#fff)}
+.appt{display:block;padding:4px;margin:4px 0;border-radius:6px;background:#e2f0ff;font-size:0.9em}
+form{display:grid;gap:8px}
+.small{font-size:0.85em;color:#555}
+.flash{padding:8px;border-radius:6px;margin-bottom:12px}
+.flash.success{background:#e6ffed}
+.flash.danger{background:#ffe6e6}
+.row{display:flex;gap:8px}
+.btn{padding:8px 12px;border-radius:6px;border:0;cursor:pointer}
+.btn.primary{background:#0b74de;color:#fff}
+.btn.danger{background:#e04b4b;color:#fff}
+.muted{color:#666}
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+<h1>Agenda</h1>
+<nav>
+<a href="{{ url_for('index') }}">Calendário</a>
+<a href="{{ url_for('clients') }}">Clientes</a>
+<a href="{{ url_for('appointments') }}">Agendamentos</a>
+<a href="{{ url_for('new_appointment') }}">Novo agendamento</a>
+<a href="{{ url_for('new_client') }}">Novo cliente</a>
+</nav>
+</header>
+{% with messages = get_flashed_messages(with_categories=true) %}
+{% if messages %}
+{% for category, msg in messages %}
+<div class="flash {{ category }}">{{ msg }}</div>
+{% endfor %}
+{% endif %}
+{% endwith %}
+{% block content %}{% endblock %}
+</div>
+</body>
+</html>
+'''
+
+TEMPLATE_INDEX_CONTENT = """
+<h1 style="text-align:center;">Agenda de {{ month_name }} {{ year }}</h1>
+
+<div style="text-align:center; margin-bottom: 20px;">
+  <a href="/?year={{ year if month > 1 else year-1 }}&month={{ 12 if month == 1 else month-1 }}">◀ Mês anterior</a> |
+  <a href="/?year={{ year if month < 12 else year+1 }}&month={{ 1 if month == 12 else month+1 }}">Próximo mês ▶</a>
+</div>
+
+<table border="1" cellspacing="0" cellpadding="6" style="width:100%; border-collapse: collapse; text-align:center;">
+  <tr style="background:#eee;">
+    <th>Dom</th><th>Seg</th><th>Ter</th><th>Qua</th><th>Qui</th><th>Sex</th><th>Sáb</th>
+  </tr>
+
+  {% for week in grid %}
+  <tr>
+    {% for day in week %}
+      <td valign="top" style="height:100px; vertical-align:top;">
+        {% if day != 0 %}
+          <strong>{{ day }}</strong><br>
+          {% set d = day %}
+          {% for a in appts_by_date.get(d, []) %}
+            <div style="font-size: 12px; margin:4px; padding:2px; background:#cfe2ff; border-radius:4px;">
+              {{ a.client.name }}<br>
+              {{ a.starts_at.strftime("%H:%M") }}
+            </div>
+          {% endfor %}
+          <a href="/appointments/new?year={{ year }}&month={{ month }}&day={{ day }}" style="font-size: 12px;">+ agendar</a>
+        {% endif %}
+      </td>
+    {% endfor %}
+  </tr>
+  {% endfor %}
+</table>
+"""
+
+# Note: Jinja macro trick isn't ideal inside render_template_string; instead we'll inject a small context processor
+@app.context_processor
+def inject_today():
+    return {'current_date': lambda: date.today()}
+
+TEMPLATE_CLIENTS = '''{% extends none %}''' + TEMPLATE_BASE + '''
+{% block content %}
+<h2>Clientes</h2>
+<a class="btn primary" href="{{ url_for('new_client') }}">Novo cliente</a>
+<table style="width:100%;margin-top:12px;border-collapse:collapse">
+<thead><tr><th>Nome</th><th>Telefone</th><th>Email</th><th>Notas</th><th>Ações</th></tr></thead>
+<tbody>
+{% for c in clients %}
+<tr>
+<td>{{ c.name }}</td>
+<td>{{ c.phone or '-' }}</td>
+<td>{{ c.email or '-' }}</td>
+<td>{{ c.notes or '-' }}</td>
+<td>
+<a class="btn" href="{{ url_for('edit_client', client_id=c.id) }}">Editar</a>
+<form style="display:inline" method="post" action="{{ url_for('delete_client', client_id=c.id) }}" onsubmit="return confirm('Deletar cliente?')">
+<button class="btn danger" type="submit">Deletar</button>
+</form>
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endblock %}
+'''
+
+TEMPLATE_CLIENT_FORM = '''{% extends none %}''' + TEMPLATE_BASE + '''
+{% block content %}
+{% if client %}
+<h2>Editar Cliente</h2>
+<form method="post">
+<label>Nome <input name="name" value="{{ client.name }}" required></label>
+<label>Telefone <input name="phone" value="{{ client.phone }}"></label>
+<label>Email <input name="email" value="{{ client.email }}"></label>
+<label>Notas <textarea name="notes">{{ client.notes }}</textarea></label>
+<div class="row"><button class="btn primary" type="submit">Salvar</button><a class="btn" href="{{ url_for('clients') }}">Cancelar</a></div>
+</form>
+{% else %}
+<h2>Novo Cliente</h2>
+<form method="post">
+<label>Nome <input name="name" required></label>
+<label>Telefone <input name="phone"></label>
+<label>Email <input name="email"></label>
+<label>Notas <textarea name="notes"></textarea></label>
+<div class="row"><button class="btn primary" type="submit">Criar</button><a class="btn" href="{{ url_for('clients') }}">Cancelar</a></div>
+</form>
+{% endif %}
+{% endblock %}
+'''
+
+TEMPLATE_APPOINTMENTS = '''{% extends none %}''' + TEMPLATE_BASE + '''
+{% block content %}
+<h2>Agendamentos</h2>
+<a class="btn primary" href="{{ url_for('new_appointment') }}">Novo agendamento</a>
+<table style="width:100%;margin-top:12px;border-collapse:collapse">
+<thead><tr><th>Data/Hora</th><th>Cliente</th><th>Descrição</th><th>Ações</th></tr></thead>
+<tbody>
+{% for a in appts %}
+<tr>
+<td>{{ a.starts_at.strftime('%Y-%m-%d %H:%M') }} — {{ a.ends_at.strftime('%H:%M') }}</td>
+<td>{{ a.client.name }}</td>
+<td>{{ a.description or '-' }}</td>
+<td>
+<a class="btn" href="{{ url_for('edit_appointment', appt_id=a.id) }}">Editar</a>
+<form style="display:inline" method="post" action="{{ url_for('delete_appointment', appt_id=a.id) }}" onsubmit="return confirm('Deletar agendamento?')">
+<button class="btn danger" type="submit">Deletar</button>
+</form>
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endblock %}
+'''
+
+TEMPLATE_APPOINTMENT_FORM = '''{% extends none %}''' + TEMPLATE_BASE + '''
+{% block content %}
+{% if appt %}
+<h2>Editar Agendamento</h2>
+{% else %}
+<h2>Novo Agendamento</h2>
+{% endif %}
+
+<form method="post">
+<label>Cliente
+<select name="client_id" required>
+{% for c in clients %}
+<option value="{{ c.id }}" {% if appt and appt.client_id==c.id %}selected{% endif %}>{{ c.name }}</option>
+{% endfor %}
+</select>
+</label>
+<label>Data <input type="date" name="date" required value="{{ appt.starts_at.date().isoformat() if appt else request.args.get('date', '') }}"></label>
+<label>Hora <input type="time" name="time" required value="{{ appt.starts_at.time().strftime('%H:%M') if appt else '' }}"></label>
+<label>Duração (min) <input type="number" name="duration" min="1" value="{{ ((appt.ends_at-appt.starts_at).seconds//60) if appt else 60 }}"></label>
+<label>Descrição <input name="description" value="{{ appt.description if appt else '' }}"></label>
+
+<div class="row"><button class="btn primary" type="submit">Salvar</button><a class="btn" href="{{ url_for('appointments') }}">Cancelar</a></div>
+</form>
+{% endblock %}
+'''
+
+if __name__ == '__main__':
+    app.run(debug=True)
