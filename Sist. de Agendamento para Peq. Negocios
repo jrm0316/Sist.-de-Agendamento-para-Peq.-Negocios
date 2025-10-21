@@ -33,6 +33,7 @@ class Appointment(db.Model):
     ends_at = db.Column(db.DateTime, nullable=False)
     description = db.Column(db.String(250))
 
+    client = db.relationship('Client', backref=db.backref('appointments', lazy=True))
 
 def __repr__(self):
     return f"<Appointment {self.id} - {self.starts_at}>"
@@ -102,24 +103,54 @@ def index():
         #datetime=datetime  # importante para usar "date()" no template
     )
 
+# === Templates ===
+TEMPLATE_BASE = """ ... """
+TEMPLATE_CLIENTS = TEMPLATE_BASE.replace("...", "...")
+TEMPLATE_CLIENT_FORM = TEMPLATE_BASE.replace("...", "...")
+TEMPLATE_APPOINTMENTS = ...
+TEMPLATE_APPOINTMENT_FORM = ...
+
 @app.route('/clients')
 def clients():
     clients = Client.query.order_by(Client.name).all()
     return render_template_string(TEMPLATE_CLIENTS, clients=clients)
 
-@app.route('/clients/new', methods=['GET', 'POST'])
+@app.route("/clients/new", methods=["GET", "POST"])
 def new_client():
-    if request.method == 'POST':
-        name = request.form.get('name').strip()
-        if not name:
-            flash('Nome é obrigatório', 'danger')
-            return redirect(url_for('new_client'))
-        c = Client(name=name, phone=request.form.get('phone'), email=request.form.get('email'), notes=request.form.get('notes'))
-        db.session.add(c)
+    if request.method == "POST":
+        name = request.form["name"]
+        phone = request.form.get("phone")
+        email = request.form.get("email")
+        notes = request.form.get("notes")
+        new = Client(name=name, phone=phone, email=email, notes=notes)
+        db.session.add(new)
         db.session.commit()
-        flash('Cliente criado', 'success')
-    return redirect(url_for('clients'))
-    return render_template_string(TEMPLATE_CLIENT_FORM, client=None)
+        flash("Cliente Salvo com Sucesso!", "success")
+        return redirect(url_for("clients"))
+
+    html = TEMPLATE_CLIENT_FORM.replace(
+        "{% block content %}{% endblock %}",
+        '''
+<h2>Novo Cliente</h2>
+<form method="post">
+  <label>Nome:</label>
+  <input type="text" name="name" required><br><br>
+
+  <label>Telefone:</label>
+  <input type="text" name="phone"><br><br>
+
+  <label>Email:</label>
+  <input type="email" name="email"><br><br>
+
+  <label>Notas:</label>
+  <textarea name="notes"></textarea><br><br>
+
+  <button type="submit" class="btn primary">Salvar</button>
+  <a href="{{ url_for('clients') }}" class="btn">Cancelar</a>
+</form>
+'''
+    )
+    return render_template_string(html)
 
 @app.route('/clients/<int:client_id>/edit', methods=['GET', 'POST'])
 def edit_client(client_id):
@@ -161,31 +192,68 @@ def new_appointment():
         flash('Cadastre ao menos um cliente antes de criar um agendamento.', 'danger')
         return redirect(url_for('clients'))
 
-
     if request.method == 'POST':
         client_id = int(request.form.get('client_id'))
-        date_str = request.form.get('date')
-        time_str = request.form.get('time')
-        duration_min = int(request.form.get('duration', 60))
+        datetime_str = request.form.get('datetime')
         description = request.form.get('description')
 
-        starts_at = datetime.fromisoformat(f"{date_str}T{time_str}")
-        ends_at = starts_at + timedelta(minutes=duration_min)
+        starts_at = datetime.fromisoformat(datetime_str)
+        ends_at = starts_at + timedelta(minutes=60)  # duração padrão: 1h
 
-
-        # check overlap
-        overlapping = Appointment.query.filter(Appointment.client_id == client_id, Appointment.starts_at < ends_at, Appointment.ends_at > starts_at).first()
+        # Verifica conflito de horário
+        overlapping = Appointment.query.filter(
+            Appointment.client_id == client_id,
+            Appointment.starts_at < ends_at,
+            Appointment.ends_at > starts_at
+        ).first()
         if overlapping:
             flash('Há um agendamento em conflito para esse cliente no horário escolhido.', 'danger')
             return redirect(url_for('new_appointment'))
 
+        # Cria o novo agendamento
         a = Appointment(client_id=client_id, starts_at=starts_at, ends_at=ends_at, description=description)
         db.session.add(a)
         db.session.commit()
-        flash('Agendamento criado', 'success')
-        return redirect(url_for('appointments'))
 
-    return render_template_string(TEMPLATE_APPOINTMENT_FORM, clients=clients, appt=None)
+        flash('Agendamento criado com sucesso!', 'success')
+        return redirect(url_for('index', year=starts_at.year, month=starts_at.month))
+
+    # --------- AQUI ENTRA A LÓGICA DO PRÉ-PREENCHIMENTO ---------
+    year = request.args.get('year', type=int)
+    month = request.args.get('month', type=int)
+    day = request.args.get('day', type=int)
+
+    pre_filled_datetime = ''
+    if year and month and day:
+        # Define horário padrão 09:00
+        pre_filled_datetime = f"{year:04d}-{month:02d}-{day:02d}T09:00"
+
+    # --------- MONTA O FORMULÁRIO ---------
+    html = TEMPLATE_BASE.replace(
+        '{% block content %}{% endblock %}',
+        f'''
+    <h2>Novo Agendamento</h2>
+    <form method="post">
+      <label>Cliente:</label>
+      <select name="client_id" required>
+        <option value="">Selecione...</option>
+        {{% for c in clients %}}
+          <option value="{{{{ c.id }}}}">{{{{ c.name }}}}</option>
+        {{% endfor %}}
+      </select><br><br>
+
+      <label>Data e hora:</label>
+      <input type="datetime-local" name="datetime" value="{pre_filled_datetime}" required><br><br>
+
+      <label>Descrição:</label>
+      <textarea name="description" rows="3" cols="40"></textarea><br><br>
+
+      <button type="submit" class="btn primary">Salvar</button>
+      <a href="{{{{ url_for('index') }}}}" class="btn">Cancelar</a>
+    </form>
+    '''
+    )
+    return render_template_string(html, clients=clients, appt=None)
 
 
 @app.route('/appointments/<int:appt_id>/edit', methods=['GET', 'POST'])
@@ -335,34 +403,11 @@ TEMPLATE_INDEX_CONTENT = """
 def inject_today():
     return {'current_date': lambda: date.today()}
 
-TEMPLATE_CLIENTS = '''{% extends none %}''' + TEMPLATE_BASE + '''
-{% block content %}
-<h2>Clientes</h2>
-<a class="btn primary" href="{{ url_for('new_client') }}">Novo cliente</a>
-<table style="width:100%;margin-top:12px;border-collapse:collapse">
-<thead><tr><th>Nome</th><th>Telefone</th><th>Email</th><th>Notas</th><th>Ações</th></tr></thead>
-<tbody>
-{% for c in clients %}
-<tr>
-<td>{{ c.name }}</td>
-<td>{{ c.phone or '-' }}</td>
-<td>{{ c.email or '-' }}</td>
-<td>{{ c.notes or '-' }}</td>
-<td>
-<a class="btn" href="{{ url_for('edit_client', client_id=c.id) }}">Editar</a>
-<form style="display:inline" method="post" action="{{ url_for('delete_client', client_id=c.id) }}" onsubmit="return confirm('Deletar cliente?')">
-<button class="btn danger" type="submit">Deletar</button>
-</form>
-</td>
-</tr>
-{% endfor %}
-</tbody>
-</table>
-{% endblock %}
-'''
 
-TEMPLATE_CLIENT_FORM = '''{% extends none %}''' + TEMPLATE_BASE + '''
-{% block content %}
+
+TEMPLATE_CLIENT_FORM = TEMPLATE_BASE.replace(
+    '{% block content %}{% endblock %}',
+    '''
 {% if client %}
 <h2>Editar Cliente</h2>
 <form method="post">
@@ -382,11 +427,12 @@ TEMPLATE_CLIENT_FORM = '''{% extends none %}''' + TEMPLATE_BASE + '''
 <div class="row"><button class="btn primary" type="submit">Criar</button><a class="btn" href="{{ url_for('clients') }}">Cancelar</a></div>
 </form>
 {% endif %}
-{% endblock %}
 '''
+)
 
-TEMPLATE_APPOINTMENTS = '''{% extends none %}''' + TEMPLATE_BASE + '''
-{% block content %}
+TEMPLATE_APPOINTMENTS = TEMPLATE_BASE.replace(
+    '{% block content %}{% endblock %}',
+    '''
 <h2>Agendamentos</h2>
 <a class="btn primary" href="{{ url_for('new_appointment') }}">Novo agendamento</a>
 <table style="width:100%;margin-top:12px;border-collapse:collapse">
@@ -407,11 +453,12 @@ TEMPLATE_APPOINTMENTS = '''{% extends none %}''' + TEMPLATE_BASE + '''
 {% endfor %}
 </tbody>
 </table>
-{% endblock %}
 '''
+)
 
-TEMPLATE_APPOINTMENT_FORM = '''{% extends none %}''' + TEMPLATE_BASE + '''
-{% block content %}
+TEMPLATE_APPOINTMENT_FORM = TEMPLATE_BASE.replace(
+    '{% block content %}{% endblock %}',
+    '''
 {% if appt %}
 <h2>Editar Agendamento</h2>
 {% else %}
@@ -433,8 +480,8 @@ TEMPLATE_APPOINTMENT_FORM = '''{% extends none %}''' + TEMPLATE_BASE + '''
 
 <div class="row"><button class="btn primary" type="submit">Salvar</button><a class="btn" href="{{ url_for('appointments') }}">Cancelar</a></div>
 </form>
-{% endblock %}
 '''
+)
 
 if __name__ == '__main__':
     app.run(debug=True)
